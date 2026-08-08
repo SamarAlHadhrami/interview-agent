@@ -144,13 +144,21 @@ async function handleMessageTurn(body: InterviewBody) {
     });
   }
 
-  const endEarly = message === "__END_INTERVIEW__";
+  // Manual early end — no structured feedback
+  if (message === "__END_INTERVIEW__") {
+    const n = state.questionsAsked;
+    const note = `Session manually ended early after ${n} question(s) were answered.`;
 
-  // Early end: skip candidate write + question loop, generate feedback now
-  if (endEarly) {
-    const transcriptText = buildTranscriptText(state);
-    return generateFeedbackResponse(state, transcriptText, sessionId, {
-      endedEarly: true,
+    try {
+      await addEpisode(note, sessionId, false);
+    } catch (err) {
+      console.error("addEpisode(early end) failed:", err);
+    }
+
+    const questionLabel = n === 1 ? "question" : "questions";
+    return NextResponse.json({
+      reply: `The interview was ended early. ${n} ${questionLabel} were answered before it was stopped.`,
+      done: true,
     });
   }
 
@@ -253,28 +261,13 @@ Regenerate ONE question that stays strictly inside those tools/objectives.`,
   }
 
   // 4. Wrap up with structured feedback
-  return generateFeedbackResponse(state, transcriptText, sessionId);
-}
-
-async function generateFeedbackResponse(
-  state: NonNullable<ReturnType<typeof deriveState>>,
-  transcriptText: string,
-  sessionId: string,
-  options?: { endedEarly?: boolean }
-) {
-  const earlyNote = options?.endedEarly
-    ? `\n\nNote: The interview was ended early after ${state.questionsAsked} question(s) covering day(s): ${
-        Array.from(state.daysCovered).join(", ") || "none"
-      }. Generate fair feedback based only on the transcript gathered so far.`
-    : "";
-
   try {
     const raw = await askGroq(
       [
         { role: "system", content: buildFeedbackSystemPrompt() },
         {
           role: "user",
-          content: `Candidate profile:\n${JSON.stringify(state.candidate, null, 2)}\n\nFull transcript:\n${transcriptText}${earlyNote}\n\nReturn the feedback JSON now.`,
+          content: `Candidate profile:\n${JSON.stringify(state.candidate, null, 2)}\n\nFull transcript:\n${transcriptText}\n\nReturn the feedback JSON now.`,
         },
       ],
       true
@@ -303,9 +296,8 @@ async function generateFeedbackResponse(
       reply: "Interview completed.",
       done: true,
       feedback: {
-        summary: options?.endedEarly
-          ? "The interview was ended early, but automated feedback generation failed."
-          : "The interview reached its coverage goals, but automated feedback generation failed.",
+        summary:
+          "The interview reached its coverage goals, but automated feedback generation failed.",
         strengths: [],
         gaps: [],
         next: ["Retry feedback generation or review the transcript manually."],

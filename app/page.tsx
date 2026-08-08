@@ -126,9 +126,7 @@ export default function Home() {
   const [done, setDone] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [retryAction, setRetryAction] = useState<
-    "start" | "send" | "end" | null
-  >(null);
+  const [retryAction, setRetryAction] = useState<"start" | "send" | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingMessageRef = useRef("");
@@ -269,7 +267,7 @@ export default function Home() {
   }
 
   async function endInterview() {
-    if (!sessionId || loading || done || !started) return;
+    if (!sessionId || loading || done) return;
 
     setLoading(true);
     setError(null);
@@ -294,14 +292,15 @@ export default function Home() {
 
       if (data.done) {
         setDone(true);
-        if (data.feedback) setFeedback(data.feedback);
+        // Early end has no feedback — clear any stale feedback card
+        setFeedback(data.feedback ?? null);
       }
     } catch (err) {
       console.error(err);
       setError(
         err instanceof Error ? err.message : "Failed to end the interview."
       );
-      setRetryAction("end");
+      setRetryAction(null);
     } finally {
       setLoading(false);
     }
@@ -312,8 +311,6 @@ export default function Home() {
       void startInterview();
     } else if (retryAction === "send") {
       void sendMessage(pendingMessageRef.current || input);
-    } else if (retryAction === "end") {
-      void endInterview();
     }
   }
 
@@ -360,7 +357,7 @@ export default function Home() {
             </select>
           </label>
 
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+          <div className="flex gap-2">
             <button
               type="button"
               onClick={() => void startInterview()}
