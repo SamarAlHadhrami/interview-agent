@@ -34,11 +34,30 @@ export async function addEpisode(
   return res.json();
 }
 
+export type MemoryEdge = {
+  fact?: string;
+  content?: string;
+  created_at?: string;
+  valid_at?: string;
+  edge_uuid?: string;
+  [key: string]: unknown;
+};
+
+export type SessionEpisode = {
+  uuid?: string;
+  content_excerpt?: string;
+  content?: string;
+  created_at?: string;
+  valid_at?: string;
+  group_id?: string;
+  [key: string]: unknown;
+};
+
 export async function searchMemory(
   query: string,
   groupId: string,
   limit = 20
-): Promise<unknown[]> {
+): Promise<MemoryEdge[]> {
   const res = await fetch(`${BREETH_BASE}/v1/search`, {
     method: "POST",
     headers: {
@@ -58,5 +77,34 @@ export async function searchMemory(
   }
 
   const data = await res.json();
-  return data.edges ?? [];
+  return (data.edges ?? []) as MemoryEdge[];
+}
+
+/** List raw episodes for a session group (content + timestamps). */
+export async function listSessionEpisodes(
+  groupId: string,
+  limit = 100
+): Promise<SessionEpisode[]> {
+  const res = await fetch(
+    `${BREETH_BASE}/v1/graph/episodes?limit=${limit}`,
+    {
+      headers: {
+        Authorization: `Bearer ${getApiKey()}`,
+      },
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Breeth listSessionEpisodes error ${res.status}: ${text}`);
+  }
+
+  const data = await res.json();
+  const episodes = (data.episodes ?? []) as SessionEpisode[];
+  const suffix = `_g_${groupId}`;
+  return episodes.filter(
+    (ep) =>
+      ep.group_id === groupId ||
+      (typeof ep.group_id === "string" && ep.group_id.endsWith(suffix))
+  );
 }
