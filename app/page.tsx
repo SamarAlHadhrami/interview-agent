@@ -379,14 +379,6 @@ export default function Home() {
           </div>
         </section>
 
-        {sessionId && (
-          <p
-            className={`${jetbrainsMono.className} mb-4 text-xs text-[#7A8A94]`}
-          >
-            session: {sessionId}
-          </p>
-        )}
-
         <div className="flex flex-1 flex-col gap-4 lg:flex-row lg:items-start lg:gap-6">
           {/* Day Rail — horizontal on mobile, sticky sidebar on desktop */}
           <aside className="w-full shrink-0 lg:sticky lg:top-6 lg:w-[280px]">
