@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import { Inter, JetBrains_Mono } from "next/font/google";
-import { candidates, curriculum, type Candidate } from "@/lib/data";
+import { candidates, type Candidate } from "@/lib/data";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -47,8 +47,9 @@ type InterviewResponse = {
 };
 
 const DAY_TAG_RE = /\[Day\s*(\d+)\]/i;
-const DAY_ATTR_RE = /\[day=(\d+)\]/i;
 const ALL_DAYS = Array.from({ length: 31 }, (_, i) => i + 1);
+const DAYS_LEFT = ALL_DAYS.slice(0, 15);
+const DAYS_RIGHT = ALL_DAYS.slice(15);
 
 function randomSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -86,48 +87,31 @@ function looksLikeCode(content: string): boolean {
 }
 
 function stripDayPrefix(content: string): string {
-  return content
-    .replace(/^\[Day\s*\d+\]\s*/i, "")
-    .replace(/^INTERVIEWER\s*\[day=\d+\]\s*:\s*/i, "")
-    .trimStart();
+  return content.replace(/^\[Day\s*\d+\]\s*/i, "").trimStart();
 }
 
-function extractDayFromContent(content: string): number | null {
-  const tagged = content.match(DAY_TAG_RE) || content.match(DAY_ATTR_RE);
-  if (tagged) {
-    const day = Number(tagged[1]);
-    if (day >= 1 && day <= 31) return day;
-  }
-
-  // Fallback: match a curriculum day title mentioned in the question text
-  const lower = stripDayPrefix(content).toLowerCase();
-  for (const d of curriculum.days) {
-    const title = d.title.toLowerCase();
-    if (title.length >= 8 && lower.includes(title)) return d.day;
-  }
-  return null;
+/** Parse [Day X] tags from assistant messages. */
+function extractDayTag(content: string): number | null {
+  const match = content.match(DAY_TAG_RE);
+  if (!match) return null;
+  const day = Number(match[1]);
+  return day >= 1 && day <= 31 ? day : null;
 }
 
-function deriveSessionProgress(messages: ChatMessage[]): {
+function deriveAskedDays(messages: ChatMessage[]): {
   askedDays: Set<number>;
   questionsAsked: number;
 } {
   const askedDays = new Set<number>();
-  let taggedQuestions = 0;
+  let questionsAsked = 0;
 
   for (const m of messages) {
     if (m.role !== "interviewer") continue;
-    const day = extractDayFromContent(m.content);
-    if (day != null) {
-      askedDays.add(day);
-      taggedQuestions += 1;
-    }
+    const day = extractDayTag(m.content);
+    if (day == null) continue;
+    askedDays.add(day);
+    questionsAsked += 1;
   }
-
-  // Fall back to interviewer turns after the welcome when tags aren't present yet
-  const interviewerCount = messages.filter((m) => m.role === "interviewer").length;
-  const questionsAsked =
-    taggedQuestions > 0 ? taggedQuestions : Math.max(0, interviewerCount - 1);
 
   return { askedDays, questionsAsked };
 }
@@ -142,7 +126,9 @@ export default function Home() {
   const [done, setDone] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [retryAction, setRetryAction] = useState<"start" | "send" | null>(null);
+  const [retryAction, setRetryAction] = useState<
+    "start" | "send" | "end" | null
+  >(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingMessageRef = useRef("");
@@ -157,7 +143,7 @@ export default function Home() {
   const started = sessionId !== null && messages.length > 0;
   const showComposer = started && !done;
   const { askedDays, questionsAsked } = useMemo(
-    () => deriveSessionProgress(messages),
+    () => deriveAskedDays(messages),
     [messages]
   );
 
@@ -282,11 +268,52 @@ export default function Home() {
     }
   }
 
+  async function endInterview() {
+    if (!sessionId || loading || done || !started) return;
+
+    setLoading(true);
+    setError(null);
+    setRetryAction(null);
+
+    try {
+      const data = await postInterview({
+        sessionId,
+        message: "__END_INTERVIEW__",
+      });
+
+      if (data.reply) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `i-${Date.now()}`,
+            role: "interviewer",
+            content: data.reply!,
+          },
+        ]);
+      }
+
+      if (data.done) {
+        setDone(true);
+        if (data.feedback) setFeedback(data.feedback);
+      }
+    } catch (err) {
+      console.error(err);
+      setError(
+        err instanceof Error ? err.message : "Failed to end the interview."
+      );
+      setRetryAction("end");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function handleRetry() {
     if (retryAction === "start") {
       void startInterview();
     } else if (retryAction === "send") {
       void sendMessage(pendingMessageRef.current || input);
+    } else if (retryAction === "end") {
+      void endInterview();
     }
   }
 
@@ -333,14 +360,26 @@ export default function Home() {
             </select>
           </label>
 
-          <button
-            type="button"
-            onClick={() => void startInterview()}
-            disabled={loading || !selectedCandidate}
-            className="rounded-lg bg-[#22D3EE] px-4 py-2.5 text-sm font-semibold text-[#0A0D10] hover:bg-[#67E8F9] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {started ? "Restart Interview" : "Start Interview"}
-          </button>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <button
+              type="button"
+              onClick={() => void startInterview()}
+              disabled={loading || !selectedCandidate}
+              className="rounded-lg bg-[#22D3EE] px-4 py-2.5 text-sm font-semibold text-[#0A0D10] hover:bg-[#67E8F9] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {started ? "Restart Interview" : "Start Interview"}
+            </button>
+            {started && !done && (
+              <button
+                type="button"
+                onClick={() => void endInterview()}
+                disabled={loading}
+                className="rounded-lg border border-[#F59E0B]/50 bg-transparent px-4 py-2.5 text-sm font-semibold text-[#F59E0B] hover:bg-[#F59E0B]/10 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                End Interview
+              </button>
+            )}
+          </div>
         </section>
 
         {sessionId && (
@@ -375,65 +414,10 @@ export default function Home() {
                 </span>
               </div>
 
-              {/* Mobile: horizontal strip */}
-              <div className="flex gap-2 overflow-x-auto pb-1 lg:hidden">
-                {ALL_DAYS.map((day) => {
-                  const active = askedDays.has(day);
-                  return (
-                    <div
-                      key={day}
-                      className="flex w-8 shrink-0 flex-col items-center gap-1"
-                      title={active ? `Day ${day} covered` : `Day ${day}`}
-                    >
-                      <span
-                        className={`h-2 w-2 rounded-full ${
-                          active ? "bg-[#22D3EE]" : "bg-[#2A3440]"
-                        }`}
-                      />
-                      <span
-                        className={`${jetbrainsMono.className} text-[10px] ${
-                          active ? "text-[#22D3EE]" : "text-[#3D4A55]"
-                        }`}
-                      >
-                        {day}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Desktop: vertical rail */}
-              <div className="hidden max-h-[min(70vh,560px)] overflow-y-auto pr-1 lg:block">
-                <ul className="relative space-y-0">
-                  <li
-                    aria-hidden
-                    className="absolute bottom-2 left-[7px] top-2 w-px bg-[#1C232B]"
-                  />
-                  {ALL_DAYS.map((day) => {
-                    const active = askedDays.has(day);
-                    return (
-                      <li
-                        key={day}
-                        className="relative flex items-center gap-3 py-1.5"
-                      >
-                        <span
-                          className={`relative z-10 h-2.5 w-2.5 shrink-0 rounded-full ring-4 ring-[#12161B] ${
-                            active ? "bg-[#22D3EE]" : "bg-[#2A3440]"
-                          }`}
-                        />
-                        <span
-                          className={`${jetbrainsMono.className} text-xs ${
-                            active
-                              ? "font-medium text-[#22D3EE]"
-                              : "text-[#3D4A55]"
-                          }`}
-                        >
-                          {active ? `Day ${day}` : day}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
+              {/* Two columns: 1–15 | 16–31, no scroll */}
+              <div className="grid grid-cols-2 gap-x-4">
+                <DayRailColumn days={DAYS_LEFT} askedDays={askedDays} />
+                <DayRailColumn days={DAYS_RIGHT} askedDays={askedDays} />
               </div>
             </div>
           </aside>
@@ -448,7 +432,7 @@ export default function Home() {
               )}
 
               {messages.map((m) => {
-                const day = extractDayFromContent(m.content);
+                const day = extractDayTag(m.content);
                 const displayContent =
                   m.role === "interviewer" ? stripDayPrefix(m.content) : m.content;
                 const codeLike = looksLikeCode(displayContent);
@@ -583,6 +567,38 @@ export default function Home() {
         </div>
       </div>
     </div>
+  );
+}
+
+function DayRailColumn({
+  days,
+  askedDays,
+}: {
+  days: number[];
+  askedDays: Set<number>;
+}) {
+  return (
+    <ul className="space-y-1">
+      {days.map((day) => {
+        const active = askedDays.has(day);
+        return (
+          <li key={day} className="flex items-center gap-2 py-0.5">
+            <span
+              className={`h-2 w-2 shrink-0 rounded-full ${
+                active ? "bg-[#22D3EE]" : "bg-[#2A3440]"
+              }`}
+            />
+            <span
+              className={`${jetbrainsMono.className} text-[11px] ${
+                active ? "font-medium text-[#22D3EE]" : "text-[#3D4A55]"
+              }`}
+            >
+              {day}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
