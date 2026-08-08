@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { addEpisode, listSessionEpisodes, searchMemory } from "@/lib/breeth";
 import { askGroq } from "@/lib/groq";
-import type { Candidate } from "@/lib/data";
+import type { Candidate, CurriculumDay } from "@/lib/data";
 import {
   buildFeedbackSystemPrompt,
   buildInterviewerSystemPrompt,
@@ -9,9 +9,11 @@ import {
   deriveState,
   formatCandidateEpisode,
   formatInterviewerEpisode,
-  inferDayForQuestion,
+  getCurriculumDay,
   normalizeEpisodes,
   parseFeedback,
+  questionReferencesOffCurriculum,
+  resolveTargetDay,
   shouldExtractIntent,
 } from "@/lib/interview";
 
@@ -20,6 +22,21 @@ type InterviewBody = {
   candidate?: Candidate;
   message?: string;
 };
+
+function fallbackQuestion(dayInfo: CurriculumDay | undefined): string {
+  if (!dayInfo) {
+    return "Can you walk me through how you approached this day's work?";
+  }
+  const tool = dayInfo.tools[0];
+  const objective = dayInfo.objectives[0];
+  if (tool && objective) {
+    return `For "${dayInfo.title}", how did you use ${tool} when working on: ${objective}?`;
+  }
+  if (objective) {
+    return `Walk me through how you completed this objective: ${objective}`;
+  }
+  return `What did you actually build or configure for ${dayInfo.title}?`;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -144,27 +161,74 @@ async function handleMessageTurn(body: InterviewBody) {
 
   // 3. Ask next question
   if (shouldContinue) {
+    const targetDay = resolveTargetDay(state, message);
+    const dayInfo = getCurriculumDay(targetDay);
+    console.log(
+      `[interview] targeting Day ${targetDay}${
+        dayInfo ? ` (${dayInfo.title})` : ""
+      }`
+    );
+
     let question: string;
     try {
       question = await askGroq([
-        { role: "system", content: buildInterviewerSystemPrompt(state) },
+        {
+          role: "system",
+          content: buildInterviewerSystemPrompt(state, targetDay),
+        },
         {
           role: "user",
-          content: `Interview transcript so far:\n\n${transcriptText}\n\nAsk the next interview question now.`,
+          content: `Interview transcript so far:\n\n${transcriptText}\n\nAsk the next interview question for Day ${targetDay} now. Use ONLY that day's curriculum tools/objectives.`,
         },
       ]);
-      question = question.trim() || "Could you walk me through your approach?";
+      question = question.trim() || fallbackQuestion(dayInfo);
+
+      if (
+        dayInfo &&
+        questionReferencesOffCurriculum(question, dayInfo)
+      ) {
+        console.warn(
+          `[interview] Day ${targetDay} question off-curriculum, regenerating once:`,
+          question
+        );
+        const regenerated = await askGroq([
+          {
+            role: "system",
+            content: buildInterviewerSystemPrompt(state, targetDay, {
+              stricter: true,
+            }),
+          },
+          {
+            role: "user",
+            content: `Your previous question was rejected because it referenced tools or topics outside Day ${targetDay}'s curriculum materials.
+
+Rejected question:
+${question}
+
+Allowed tools:
+${dayInfo.tools.map((t) => `- ${t}`).join("\n")}
+
+Allowed objectives:
+${dayInfo.objectives.map((o) => `- ${o}`).join("\n")}
+
+Interview transcript so far:
+${transcriptText}
+
+Regenerate ONE question that stays strictly inside those tools/objectives.`,
+          },
+        ]);
+        question = regenerated.trim() || question;
+      }
     } catch (err) {
       console.error("askGroq(question) failed:", err);
       return NextResponse.json({
-        reply:
-          "Thanks — let's continue. Can you elaborate on your most recent answer with a concrete example?",
+        reply: fallbackQuestion(dayInfo),
         done: false,
       });
     }
 
-    const day = inferDayForQuestion(state, question);
-    const episodeContent = formatInterviewerEpisode(day, question);
+    console.log(`[interview] Day ${targetDay} question:`, question);
+    const episodeContent = formatInterviewerEpisode(targetDay, question);
 
     try {
       await addEpisode(episodeContent, sessionId, false);

@@ -23,10 +23,72 @@ export type InterviewState = {
   memoryFacts: string[];
 };
 
-const INTERVIEWER_RE = /^INTERVIEWER\s*\[day=(\d+)\]\s*:\s*([\s\S]*)$/i;
+const INTERVIEWER_RE =
+  /^(?:\[Day\s*\d+\]\s*)?INTERVIEWER\s*\[day=(\d+)\]\s*:\s*([\s\S]*)$/i;
+
+/** Common tech names that models invent; blocked unless on the day's list. */
+const EXTERNAL_TECH = [
+  "pinecone",
+  "matplotlib",
+  "seaborn",
+  "plotly",
+  "tensorflow",
+  "pytorch",
+  "keras",
+  "scikit-learn",
+  "sklearn",
+  "aws",
+  "azure",
+  "gcp",
+  "sagemaker",
+  "redis",
+  "mongodb",
+  "postgres",
+  "postgresql",
+  "mysql",
+  "spark",
+  "hadoop",
+  "kafka",
+  "airflow",
+  "dbt",
+  "snowflake",
+  "databricks",
+  "chroma",
+  "chromadb",
+  "weaviate",
+  "qdrant",
+  "milvus",
+  "faiss",
+  "llamaindex",
+  "llama index",
+  "openai",
+  "anthropic",
+  "claude",
+  "chatgpt",
+  "hugging face",
+  "huggingface",
+  "numpy",
+  "scipy",
+  "tableau",
+  "power bi",
+  "kubernetes",
+  "k8s",
+  "terraform",
+  "ansible",
+  "jenkins",
+  "graphql",
+  "grpc",
+  "elasticsearch",
+  "opensearch",
+  "neo4j",
+  "cassandra",
+  "dynamodb",
+  "bigquery",
+  "redshift",
+];
 
 export function formatInterviewerEpisode(day: number, question: string): string {
-  return `INTERVIEWER [day=${day}]: ${question}`;
+  return `[Day ${day}] INTERVIEWER [day=${day}]: ${question}`;
 }
 
 export function formatCandidateEpisode(
@@ -206,36 +268,65 @@ export function buildTranscriptText(
   return lines.join("\n\n");
 }
 
-export function buildInterviewerSystemPrompt(state: InterviewState): string {
-  const day = currentDayFromTranscript(state) ?? nextTargetDay(state);
-  const targetDay =
-    state.questionsAsked === 0 ? nextTargetDay(state) : day;
-  const nextDay = nextTargetDay(state);
-  const dayInfo = getCurriculumDay(targetDay);
-  const nextInfo = getCurriculumDay(nextDay);
+/** Decide which curriculum day this turn's question must target. */
+export function resolveTargetDay(
+  state: InterviewState,
+  latestMessage?: string
+): number {
+  if (state.questionsAsked === 0) return nextTargetDay(state);
 
-  const dayBlock = dayInfo
-    ? `Current/target day ${dayInfo.day}: ${dayInfo.title}
+  const current = currentDayFromTranscript(state);
+  if (current == null) return nextTargetDay(state);
+
+  if (latestMessage && shouldFollowUpOnDay(latestMessage)) {
+    return current;
+  }
+
+  return nextTargetDay(state);
+}
+
+function shouldFollowUpOnDay(message: string): boolean {
+  const trimmed = message.trim();
+  if (trimmed.length < 80) return true;
+  if (
+    /\b(i don't know|i do not know|not sure|no idea|unsure|never used|didn't cover|skipped)\b/i.test(
+      trimmed
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function formatDayMaterials(dayInfo: CurriculumDay): string {
+  return `Day number: ${dayInfo.day}
+Title: ${dayInfo.title}
 Type: ${dayInfo.type}
-Tools: ${dayInfo.tools.join(", ")}
-Objectives:\n- ${dayInfo.objectives.join("\n- ")}`
-    : `Target day: ${targetDay}`;
 
-  const nextBlock =
-    nextInfo && nextInfo.day !== dayInfo?.day
-      ? `Next planned day ${nextInfo.day}: ${nextInfo.title} (tools: ${nextInfo.tools.join(", ")})`
-      : "";
+Tools (verbatim from curriculum.json):
+${dayInfo.tools.map((t) => `- ${t}`).join("\n")}
 
-  const plan = state.plannedDays
-    .map((d) => {
-      const info = getCurriculumDay(d);
-      const bucket = state.candidate.missions.find((m) => m.day === d);
-      const label = isWeakMission(bucket ?? { day: d, title: "" })
-        ? "weak"
-        : "strong";
-      return `Day ${d}${info ? ` (${info.title})` : ""} [${label}]`;
-    })
-    .join(", ");
+Objectives (verbatim from curriculum.json):
+${dayInfo.objectives.map((o) => `- ${o}`).join("\n")}`;
+}
+
+export function buildInterviewerSystemPrompt(
+  state: InterviewState,
+  targetDay: number,
+  options?: { stricter?: boolean }
+): string {
+  const dayInfo = getCurriculumDay(targetDay);
+  const materials = dayInfo
+    ? formatDayMaterials(dayInfo)
+    : `Day number: ${targetDay}\n(No curriculum entry found — ask a general question about the candidate's work on this day number only.)`;
+
+  const stricterBlock = options?.stricter
+    ? `
+STRICT REGENERATION MODE:
+- Your previous question was rejected for mentioning off-curriculum technology or topics.
+- Rewrite using ONLY the tools and objectives listed below.
+- Do not name any library, product, database, cloud service, or framework that is not explicitly listed under Tools or Objectives.`
+    : "";
 
   return `You are a rigorous but fair technical interviewer for an AI engineering cohort.
 
@@ -244,25 +335,91 @@ Candidate profile:
 - Role: ${state.candidate.member.jobRole}
 - Experience: ${state.candidate.member.yearsExperience} years
 - Education: ${state.candidate.member.education}
-- Signals: ${JSON.stringify(state.candidate.signals)}
 
-Interview plan (cover these days; prefer probing weak days): ${plan}
 Questions asked so far: ${state.questionsAsked}
 Days covered so far: ${Array.from(state.daysCovered).join(", ") || "none"}
+This question MUST target Day ${targetDay} only.
 
-${dayBlock}
-${nextBlock}
+=== CURRICULUM MATERIALS FOR DAY ${targetDay} (ONLY source of topic material) ===
+${materials}
+=== END CURRICULUM MATERIALS ===
+${stricterBlock}
 
-Memory facts from this session:
-${state.memoryFacts.length ? state.memoryFacts.map((f) => `- ${f}`).join("\n") : "- (none yet)"}
-
-Instructions:
+Grounding rules (mandatory):
+- Only ask about tools, concepts, or objectives listed above for this day.
+- Do not introduce outside technologies (e.g. do not mention Pinecone, Matplotlib, SQL, or any tool not listed) unless it appears in this day's tools/objectives.
+- The curriculum block above is the ONLY source of topic material for this question.
 - Ask ONE question only. No preamble, no feedback essay, no markdown headings.
-- If the candidate's latest answer is incomplete, shallow, or interesting, ask an intelligent follow-up on the SAME day.
-- Otherwise move to the next planned day that still needs coverage.
-- Prefer practical, scenario-based questions tied to the day's tools/objectives.
+- Prefer a practical, scenario-based question tied directly to the listed tools/objectives.
 - Keep the question under 400 characters.
-- Do not reveal the scoring plan or bucket labels.`;
+- Do not reveal scoring plans or bucket labels.
+- Do not ask about other curriculum days.`;
+}
+
+function normalizePhrase(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9+.#]+/g, " ").trim();
+}
+
+function buildAllowedPhrases(dayInfo: CurriculumDay): Set<string> {
+  const allowed = new Set<string>();
+  const add = (raw: string) => {
+    const n = normalizePhrase(raw);
+    if (n) allowed.add(n);
+  };
+
+  add(dayInfo.title);
+  for (const tool of dayInfo.tools) add(tool);
+  for (const obj of dayInfo.objectives) {
+    add(obj);
+    // also allow meaningful chunks from objectives
+    for (const part of obj.split(/[,:;]/)) {
+      const n = normalizePhrase(part);
+      if (n.length >= 4) allowed.add(n);
+    }
+  }
+  return allowed;
+}
+
+function phraseAllowed(phrase: string, allowed: Set<string>): boolean {
+  const n = normalizePhrase(phrase);
+  if (!n) return true;
+  if (allowed.has(n)) return true;
+  // Allow when the curriculum text itself mentions this tool/phrase
+  for (const a of Array.from(allowed)) {
+    if (a.includes(n)) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns true if the question appears to reference tools/topics outside
+ * this day's curriculum tools + objectives.
+ */
+export function questionReferencesOffCurriculum(
+  question: string,
+  dayInfo: CurriculumDay
+): boolean {
+  const allowed = buildAllowedPhrases(dayInfo);
+  const q = normalizePhrase(question);
+
+  // Any tool from another curriculum day that isn't allowed here
+  for (const day of curriculum.days) {
+    for (const tool of day.tools) {
+      const t = normalizePhrase(tool);
+      if (t.length < 3) continue;
+      if (!q.includes(t)) continue;
+      if (!phraseAllowed(tool, allowed)) return true;
+    }
+  }
+
+  for (const banned of EXTERNAL_TECH) {
+    const b = normalizePhrase(banned);
+    if (b.length < 3) continue;
+    if (!q.includes(b)) continue;
+    if (!phraseAllowed(banned, allowed)) return true;
+  }
+
+  return false;
 }
 
 export function buildFeedbackSystemPrompt(): string {
@@ -298,31 +455,3 @@ export function parseFeedback(raw: string): InterviewFeedback {
   }
 }
 
-/** Best-effort day tag for a newly generated question. */
-export function inferDayForQuestion(
-  state: InterviewState,
-  question: string
-): number {
-  const dayMention = question.match(/\bday\s*(\d+)\b/i);
-  if (dayMention) return Number(dayMention[1]);
-
-  for (const d of state.plannedDays) {
-    const info = getCurriculumDay(d);
-    if (!info) continue;
-    if (
-      question.toLowerCase().includes(info.title.toLowerCase().slice(0, 18))
-    ) {
-      return d;
-    }
-  }
-
-  if (state.questionsAsked === 0) return nextTargetDay(state);
-
-  const current = currentDayFromTranscript(state);
-  // If we still need new days, prefer next uncovered; else stay on current
-  const uncovered = state.plannedDays.filter((d) => !state.daysCovered.has(d));
-  if (uncovered.length > 0 && state.daysCovered.size < 4) {
-    return uncovered[0];
-  }
-  return current ?? nextTargetDay(state);
-}
